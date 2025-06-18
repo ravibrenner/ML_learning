@@ -1,0 +1,152 @@
+---
+title: "tidymodels"
+author: "Ravi Brenner"
+date: "2025-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      warning = FALSE,
+                      message = FALSE)
+```
+
+Following along with the tidymodels tutorial found here: https://www.tidymodels.org/start/models/
+
+I have a lot of R experience, and some experience with caret and tidymodels too, so hopefully this will be easy for me.
+
+# Build a model
+```{r}
+library(tidymodels)
+library(readr)       # for importing data
+library(broom.mixed) # for converting bayesian models to tidy tibbles
+library(dotwhisker)  # for visualizing regression results
+
+theme_set(theme_bw())
+```
+
+Read in sea urchins data
+```{r}
+urchins <- read_csv("https://tidymodels.org/start/models/urchins.csv") |>
+  setNames(c("food_regime","initial_volume","width")) |>
+  mutate(food_regime = factor(food_regime, levels = c("Initial", "Low", "High")))
+
+head(urchins)
+str(urchins)
+```
+
+We can quickly plot this data, since it isn't very large
+
+```{r}
+ggplot(urchins,
+       aes(x = initial_volume, y = width , color = food_regime)) +
+  geom_point() + 
+  geom_smooth(method = lm, se = FALSE) + 
+  scale_color_viridis_d(option = "plasma", end = 0.7) 
+```
+
+So there's a generally positive relationship, and it appears to be impacted by food_regime
+
+## fitting a simple model
+
+Creating the model in tidymodels means creating a pipeline of components
+
+```{r}
+lm_mod <- linear_reg() 
+```
+
+```{r}
+lm_fit <- lm_mod |>
+  fit(width ~ initial_volume * food_regime, data = urchins)
+
+tidy(lm_fit)
+```
+
+```{r}
+tidy(lm_fit) |>
+  dotwhisker::dwplot(dot_args = list(size = 2,color = "black"),
+                     whisker_args = list(color = "black"),
+                     vline = geom_vline(xintercept = 0, color = "gray",linetype = 2))
+```
+
+So we very easily fit a model. `fit` from parsnip is clearly very similar to `train` from caret
+
+## Predicting with the model
+
+```{r}
+new_points <- expand_grid(initial_volume = 20, 
+                          food_regime = c("Initial", "Low", "High"))
+
+mean_pred <- predict(lm_fit, new_data = new_points)
+mean_pred
+
+conf_int_pred <- predict(lm_fit, new_data = new_points,
+                         type = "conf_int")
+conf_int_pred
+
+plot_data <- new_points |>
+  bind_cols(mean_pred) |>
+  bind_cols(conf_int_pred)
+```
+
+```{r}
+ggplot(plot_data, aes(x = food_regime)) + 
+  geom_point(aes(y = .pred)) + 
+  geom_errorbar(aes(ymin = .pred_lower, 
+                    ymax = .pred_upper),
+                width = .2) + 
+  labs(y = "urchin size")
+```
+
+Very simple, and familiar from working with caret.
+
+## use a different engine
+
+We can train more complicated models using other engines. here is a stan_glm model
+
+```{r}
+prior_dist <- rstanarm::student_t(df = 1)
+
+set.seed(123)
+
+# creating the model itself
+bayes_mod <- linear_reg() |>
+  set_engine("stan",
+             prior_intercept = prior_dist,
+             prior = prior_dist)
+
+bayes_fit <- bayes_mod |>
+  fit(width ~ initial_volume * food_regime, data = urchins)
+```
+
+```{r}
+tidy(bayes_fit, conf.int = T)
+```
+
+We can now recycle our code from earlier
+
+```{r}
+bayes_plot_data <- new_points |>
+  bind_cols(predict(bayes_fit, new_data = new_points)) |>
+  bind_cols(predict(bayes_fit, new_data = new_points, type = "conf_int"))
+```
+
+```{r}
+ggplot(bayes_plot_data, aes(x = food_regime)) + 
+  geom_point(aes(y = .pred)) + 
+  geom_errorbar(aes(ymin = .pred_lower, 
+                    ymax = .pred_upper),
+                width = .2) + 
+  labs(y = "urchin size") + 
+  ggtitle("Bayesian model with t(1) prior dist")
+```
+
+# Preprocess data with recipes
+
+# Evaluate model with resamples
+
+# Tune model parameters
+
+# Case study
+
+# My personal case study
