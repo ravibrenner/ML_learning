@@ -295,6 +295,102 @@ flights_pred2 |>
 
 
 # Evaluate model with resamples
+```{r}
+library(modeldata)
+
+data(cells, package = "modeldata")
+cells
+```
+
+There are two values of class, PS for poorly segmented, and WS for well segmented
+
+```{r}
+cells |>
+  count(class) |>
+  mutate(pct = n / sum(n))
+```
+
+For data splitting, in this case it has been done for us, so that the proportions in each are consistent
+```{r}
+set.seed(123)
+cell_split <- initial_split(cells |> select(-case),
+                            strata = class)
+
+cell_train <- training(cell_split)
+cell_test <- testing(cell_split)
+
+cell_train |> count(class) |> mutate(pct = n/sum(n))
+cell_test |> count(class) |> mutate(pct = n/sum(n))
+```
+
+Here we'll use a random forest modeling approach using ranger. this is a somewhat more opaque modeling procedure than glms
+
+```{r}
+rf_mod <- rand_forest(trees = 1000) |>
+  set_engine("ranger") |>
+  set_mode("classification")
+```
+
+Now we can fit the model
+```{r}
+set.seed(234)
+rf_fit <- rf_mod |>
+  fit(class ~ ., data = cell_train)
+
+rf_fit
+```
+
+we previously saw how to use roc_auc() to check model fit. We could also use accuracy() in theory.
+
+Here it is on the training set
+```{r}
+rf_training_pred <- predict(rf_fit, cell_train) |>
+  bind_cols(predict(rf_fit, cell_train, type = "prob")) |>
+  bind_cols(cell_train |> select(class))
+
+rf_training_pred |>
+  roc_auc(truth = class, .pred_PS)
+
+rf_training_pred |>
+  accuracy(truth = class, .pred_class)
+```
+
+Those values are too good to be true. Our model is probably overfit, and there is a performance drop off with the testing data
+```{r}
+rf_testing_pred <- predict(rf_fit, cell_test) |>
+  bind_cols(predict(rf_fit, cell_test, type = "prob")) |>
+  bind_cols(cell_test |> select(class))
+
+rf_testing_pred |>
+  roc_auc(truth = class, .pred_PS)
+
+rf_testing_pred |>
+  accuracy(truth = class, .pred_class)
+```
+
+We skipped an important step here, which is resampling! Most commonly we use K fold cross validation.
+
+```{r}
+set.seed(345)
+folds <- vfold_cv(cell_train, v = 10)
+```
+
+```{r}
+rf_wf <- 
+  workflow() |>
+  add_model(rf_mod) |>
+  add_formula(class ~ .)
+
+set.seed(456)
+rf_fit_rs <- 
+  rf_wf |>
+  fit_resamples(folds)
+```
+
+```{r}
+collect_metrics(rf_fit_rs)
+```
+
 
 # Tune model parameters
 
