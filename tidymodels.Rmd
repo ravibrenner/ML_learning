@@ -142,6 +142,157 @@ ggplot(bayes_plot_data, aes(x = food_regime)) +
 ```
 
 # Preprocess data with recipes
+```{r}
+library(nycflights13)
+library(skimr)
+```
+
+Import the data
+```{r}
+set.seed(123)
+
+flights_data <- flights |>
+  mutate(arr_delay = if_else(arr_delay >= 30, "late","on_time"),
+         arr_delay = factor(arr_delay),
+         date = lubridate::as_date(time_hour)) |>
+  inner_join(weather, by = join_by("origin","time_hour")) |>
+  select(dep_time, flight, origin, dest, air_time,
+         distance, carrier, date, arr_delay, time_hour) |>
+  na.omit() |>
+  mutate(across(where(is.character), as.factor))
+```
+
+check how many flights arrived late
+```{r}
+flights_data |>
+  count(arr_delay) |>
+  mutate(pct = n / sum(n))
+```
+
+check out the data using glimpse (like `str()`)
+```{r}
+glimpse(flights_data)
+```
+
+note that arr_delay is a binary outcome variable, and that flight and time_hour are unique to each row.
+
+```{r}
+flights_data |>
+  skim(dest,carrier)
+```
+104 destinations and 16 carriers, which are large numbers for categorical variables. may need to deal with that later.
+
+data splitting
+```{r}
+set.seed(222)
+
+data_split <- initial_split(flights_data, prop = 0.75)
+
+train_data <- training(data_split)
+test_data <- testing(data_split)
+```
+
+## creating the recipe
+
+For a simple glm model. The recipe function takes a formula and the data. then, you add roles to the recipe, specifying what each column should do in the model. in this case we specify the IDs, since they shouldn't really be included in the model
+```{r}
+flights_rec <- recipe(arr_delay ~ ., data = train_data) |>
+  update_role(flight, time_hour, new_role = "ID")
+```
+
+Now we want to create some features ("feature engineering"). We could just create new columns, and then select the ones we want in the model (e.g. using dplyr). however we can make it part of the recipe workflow to maintain the full data structure
+
+Here we are doing some modifications to the date column. keep_original_cols = FALSE drops the old in favor of the new. we can also create dummy variables
+```{r}
+flights_rec <- recipe(arr_delay ~ ., data = train_data) |>
+  update_role(flight, time_hour, new_role = "ID") |>
+  step_date(date, features = c("dow","month")) |>            
+  step_holiday(date, 
+               holidays = timeDate::listHolidays("US"), 
+               keep_original_cols = FALSE) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors()) # removes factor levels with a single value (zero variance = zv)
+```
+
+All that work has just written the recipe of what should occur, nothing has actually happened.
+
+Now we define the model as before
+```{r}
+glm_mod <- logistic_reg() |>
+  set_engine("glm")
+```
+
+Now create the workflow
+```{r}
+flights_wflow <- workflow() |>
+  add_model(glm_mod) |>
+  add_recipe(flights_rec)
+```
+
+Now fit the actual model
+```{r}
+flights_fit <- flights_wflow |>
+  fit(data = train_data)
+```
+
+```{r}
+flights_fit |>
+  extract_fit_parsnip() |>
+  tidy()
+```
+
+Now we can do predictions. As a reminder, the steps so far were
+1. build model
+2. create recipe
+3. bundle in workflow
+4. train workflow using fit
+
+now we have 5. predict
+```{r}
+predict(flights_fit, test_data)
+```
+
+To get probabilities we could set type = "prob" or we could use augment like this:
+```{r}
+flights_pred <- flights_fit |>
+  broom::augment(test_data) 
+
+flights_pred |>
+  select(arr_delay,time_hour, flight, .pred_class, .pred_on_time)
+```
+
+Finally, to assess performance we can look at the ROC curve
+```{r}
+flights_pred |>
+  roc_curve(truth = arr_delay, .pred_late) |>
+  autoplot()
+
+flights_pred |>
+  roc_auc(truth = arr_delay, .pred_late)
+```
+
+In principle, the recipe/workflow combination earlier should make it easier to try out different models or features. for example we could fit the unmodified data like this:
+
+```{r}
+flights_wflow2 <- workflow() |>
+  add_model(glm_mod) |>
+  add_formula(arr_delay ~ .)
+
+flights_fit2 <- flights_wflow2 |>
+  fit(data = train_data |>
+        select(-time_hour, -flight))
+
+flights_fit2 |>
+  extract_fit_parsnip() |>
+  tidy()
+
+flights_pred2 <- flights_fit2 |>
+  broom::augment(test_data) 
+
+flights_pred2 |>
+  roc_auc(truth = arr_delay, .pred_late)
+```
+
 
 # Evaluate model with resamples
 
