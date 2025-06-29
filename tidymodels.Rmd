@@ -394,6 +394,343 @@ collect_metrics(rf_fit_rs)
 
 # Tune model parameters
 
-# Case study
+```{r}
+library(rpart.plot)
+library(vip)
+```
 
-# My personal case study
+```{r}
+data(cells, packages = "modeldata")
+cells
+```
+
+Now we'll tune a random forest model but with more control/emphasis on the hyperparameters. In this case, cost complexity and max tree depth.
+
+```{r}
+set.seed(123)
+cell_split <- initial_split(cells |> select(-case),
+                            strata = class)
+cell_train <- training(cell_split)
+cell_test <- testing(cell_split)
+```
+
+The fact that we want to tune is encoded in the parsnip part of the modeling process, where we specify the model. tune() here is just a placeholder
+
+```{r}
+tune_spec <- decision_tree(cost_complexity = tune(),
+                           tree_depth = tune()) |>
+  set_engine("rpart") |>
+  set_mode("classification")
+```
+
+Now we make the grid. grid_regular() sort of auto-selects some reasonable starting values, given the number of values I want
+```{r}
+tree_grid <- grid_regular(cost_complexity(),
+                          tree_depth(),
+                          levels = 5)
+```
+
+Finally set up the cross validation
+```{r}
+set.seed(234)
+cell_folds <- vfold_cv(cell_train)
+```
+
+Now we tune using tune_grid(). In theory we could tune a model along with a recipe, or tune a workflow. here is the workflow version:
+
+```{r}
+set.seed(345)
+
+tree_wf <- workflow() |>
+  add_model(tune_spec) |> # the model from earlier
+  add_formula(class ~ . ) # model formula
+
+tree_res <- tree_wf |>
+  tune_grid(resamples = cell_folds, # the data
+            grid = tree_grid) # the tuning grid
+
+tree_res |>
+  collect_metrics() |>
+  mutate(tree_depth = factor(tree_depth)) |>
+  ggplot(aes(x = cost_complexity, y = mean, color = tree_depth)) + 
+  geom_line() + 
+  geom_point() + 
+  facet_wrap(~.metric, scales = "free",nrow = 2) + 
+  scale_x_log10(labels = scales::label_number()) + 
+  scale_color_viridis_d(option = "plasma",begin = 0.9, end =0)
+```
+
+We could quickly check the best ones like this:
+```{r}
+tree_res |>
+  show_best(metric = "roc_auc")
+
+tree_res |>
+  select_best(metric = "accuracy")
+```
+
+To get to the final model, we select those parameters
+```{r}
+final_wf <- 
+  tree_wf |>
+  finalize_workflow(tree_res |> select_best(metric = "accuracy"))
+```
+
+And do the fit
+
+(note final fit uses full data, and evaluated on the testing data only)
+```{r}
+final_fit <- final_wf |>
+  last_fit(cell_split)
+
+final_fit |>
+  collect_metrics()
+
+final_fit |>
+  collect_predictions() |>
+  roc_curve(class,.pred_PS) |>
+  autoplot()
+```
+
+At this stage, if you want to dive deeper into the final fit, you can extract the tree data from the workflow object/fitted object
+```{r}
+final_tree <- extract_workflow(final_fit)
+
+final_tree |>
+  extract_fit_engine() |>
+  rpart.plot(roundint = F)
+```
+
+We could do variable importance with this too, anything we would do with the raw model output.
+```{r}
+final_tree |>
+  extract_fit_parsnip() |>
+  vip()
+```
+
+Note, we just used some default values for the hyperparameters here. there are more hyperparameters, and we could have specified a wider or more sepcific grid. grid_regular() just returns a tibble, so any tibble we want to construct (e.g. using expand_grid) would work too.
+
+# Case study
+```{r}
+hotels <- read_csv("https://tidymodels.org/start/case-study/hotels.csv") |>
+  mutate(across(where(is.character), as.factor))
+
+glimpse(hotels)
+```
+
+The goal is to build a model to predict which stays included children/babies, and which did not--the outcome variable being "children"
+```{r}
+hotels |>
+  count(children) |>
+  mutate(pct = n/sum(n))
+```
+
+The percentage is relatively small, which could lead to some overfitting issues down the road. For this case study, we will leave it as-is.
+
+## splitting and resampling
+```{r}
+set.seed(123)
+hotel_split <- initial_split(hotels, strata = children,
+                             prop = 0.75)
+hotel_other <- training(hotel_split)
+hotel_test <- testing(hotel_split)
+```
+
+
+```{r}
+# create validation set
+set.seed(234)
+val_set <- validation_split(hotel_other, strata = children,
+                            prop = 0.8)
+```
+
+## penalized glm model (lasso)
+
+Set up model
+```{r}
+lr_mod <- logistic_reg(penalty = tune(),
+                       mixture = 1) |>
+  set_engine("glmnet")
+```
+
+Set up recipe
+```{r}
+holidays <- c("AllSouls", "AshWednesday", "ChristmasEve", "Easter", 
+              "ChristmasDay", "GoodFriday", "NewYearsDay", "PalmSunday")
+
+lr_recipe <- recipe(children ~ ., data = hotel_other) |>
+  step_date(arrival_date) |>
+  step_holiday(arrival_date, holidays = holidays) |>
+  step_rm(arrival_date) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors()) |>
+  step_normalize(all_predictors())
+```
+
+Create workflow
+```{r}
+lr_workflow <- workflow() |>
+  add_model(lr_mod) |>
+  add_recipe(lr_recipe)
+```
+
+Create tuning grid
+```{r}
+lr_reg_grid <- tibble(penalty = 10^seq(-4,-1,length.out = 30))
+```
+
+Train and tune model
+```{r}
+lr_res <- lr_workflow |>
+  tune_grid(val_set, # data
+            grid = lr_reg_grid, # tuning param
+            control = control_grid(save_pred = T), # save out of sample predictions/ validation data
+            metrics = metric_set(roc_auc)) # how to evaluate model performance
+```
+
+Now we can visualize
+```{r}
+lr_res |>
+  collect_metrics() |>
+  ggplot(aes(x = penalty, y = mean)) + 
+  geom_point() + geom_line() + 
+  scale_x_log10(labels = scales::label_number())
+```
+
+```{r}
+lr_res |>
+  show_best(metric = "roc_auc",n = 15) |>
+  arrange(-mean,-penalty)
+```
+
+All else equal, we probably want a higher penalty value, since it may be less overfit. but we can just autoselect the best one
+```{r}
+lr_best <- lr_res |>
+  collect_metrics() |>
+  arrange(-mean)  |>
+  slice(1)
+```
+
+```{r}
+lr_auc <- lr_res  |>
+  collect_predictions(parameters = lr_best) |>
+  roc_curve(children, .pred_children) |>
+  mutate(model = "Logistic Regression")
+
+autoplot(lr_auc)
+```
+
+## Tree based ensemble
+Here, processing could take a while, so we may take advantage of parallel processing
+```{r}
+cores <- parallel::detectCores()
+cores
+```
+
+Define model
+```{r}
+rf_mod <- rand_forest(mtry = tune(),
+                      min_n = tune(),
+                      trees = 1000 ) |>
+  set_engine("ranger",num.threads = cores) |>
+  set_mode("classification")
+```
+
+Recipe
+```{r}
+rf_recipe <- recipe(children~ ., data = hotel_other) |>
+  step_date(arrival_date) |>
+  step_holiday(arrival_date) |>
+  step_rm(arrival_date)
+```
+
+Workflow
+```{r}
+rf_workflow <- workflow() |>
+  add_model(rf_mod) |>
+  add_recipe(rf_recipe)
+```
+
+Tune model
+
+```{r}
+set.seed(345)
+rf_res <- rf_workflow |>
+  tune_grid(val_set,
+            grid = 25,
+            control = control_grid(save_pred = T),
+            metrics = metric_set(roc_auc))
+```
+
+best models
+```{r}
+rf_res |>
+  show_best(metric = "roc_auc")
+```
+
+Can already see that AUC is much higher here.
+```{r}
+autoplot(rf_res)
+```
+
+Select best model
+```{r}
+rf_best <- rf_res |>
+  select_best(metric = "roc_auc")
+
+rf_best
+```
+
+```{r}
+rf_auc <- rf_res |>
+  collect_predictions(parameters = rf_best) |>
+  roc_curve(children, .pred_children) |>
+  mutate(model = "Random forest")
+```
+
+```{r}
+bind_rows(rf_auc, lr_auc) |>
+  ggplot(aes(x = 1-specificity,y = sensitivity, color = model)) + 
+  geom_line() + 
+  geom_abline(lty = 3) + 
+  coord_equal() +
+  scale_color_viridis_d(option = "plasma", end = 0.6)
+```
+
+## fit final model
+```{r}
+last_rf_mod <- rand_forest(mtry = 9, min_n = 3, trees = 1000) |>
+  set_engine("ranger",num.threads = cores, importance = "impurity") |>
+  set_mode("classification")
+
+last_rf_workflow <- rf_workflow |>
+  update_model(last_rf_mod) 
+
+set.seed(345)
+last_rf_fit <- last_rf_workflow |>
+  last_fit(hotel_split)
+```
+
+
+```{r}
+last_rf_fit |>
+  collect_metrics()
+```
+
+Pretty high AUC at 0.923
+
+Check variable importance:
+
+```{r}
+last_rf_fit |>
+  extract_fit_parsnip() |>
+  vip(num_features = 20)
+```
+
+```{r}
+last_rf_fit |>
+  collect_predictions() |>
+  roc_curve(truth = children,.pred_children) |>
+  autoplot()
+```
+
